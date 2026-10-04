@@ -29,28 +29,42 @@ class CrossEncoderReranker:
 
     def _load_model(self):
         if self._model is None:
-            # TODO: Load cross-encoder model
-            # from sentence_transformers import CrossEncoder
-            # self._model = CrossEncoder(self.model_name)
-            #
-            # ⚠️ LƯU Ý: Dùng sentence_transformers.CrossEncoder, KHÔNG dùng FlagEmbedding.
-            # FlagReranker crash với transformers>=5.0 (XLMRobertaTokenizer lỗi).
-            pass
+            import os
+            os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+            from sentence_transformers import CrossEncoder
+            try:
+                self._model = CrossEncoder(self.model_name, local_files_only=True)
+            except Exception:
+                try:
+                    self._model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+                except Exception:
+                    self._model = CrossEncoder(self.model_name)
         return self._model
 
     def rerank(self, query: str, documents: list[dict], top_k: int = RERANK_TOP_K) -> list[RerankResult]:
         """Rerank documents: top-20 → top-k."""
-        # TODO: Implement reranking
-        # 1. if not documents: return []
-        # 2. model = self._load_model()
-        # 3. pairs = [(query, doc["text"]) for doc in documents]
-        # 4. scores = model.predict(pairs)
-        # 5. if isinstance(scores, (int, float)): scores = [scores]
-        # 6. scored = sorted(zip(scores, documents), key=lambda x: x[0], reverse=True)
-        # 7. Return [RerankResult(text=..., original_score=doc.get("score", 0.0),
-        #            rerank_score=float(score), metadata=..., rank=i)
-        #            for i, (score, doc) in enumerate(scored[:top_k])]
-        return []
+        if not documents:
+            return []
+        model = self._load_model()
+        pairs = [(query, doc.get("text", "")) for doc in documents]
+        scores = model.predict(pairs)
+        if isinstance(scores, (int, float)):
+            scores = [float(scores)]
+        else:
+            scores = [float(s) for s in scores]
+
+        scored = sorted(zip(scores, documents), key=lambda x: x[0], reverse=True)
+        return [
+            RerankResult(
+                text=doc.get("text", ""),
+                original_score=float(doc.get("score", 0.0)),
+                rerank_score=float(score),
+                metadata=doc.get("metadata", {}),
+                rank=i
+            )
+            for i, (score, doc) in enumerate(scored[:top_k])
+        ]
 
 
 class FlashrankReranker:
@@ -58,11 +72,30 @@ class FlashrankReranker:
     def __init__(self):
         self._model = None
 
+    def _load_model(self):
+        if self._model is None:
+            from flashrank import Ranker
+            self._model = Ranker()
+        return self._model
+
     def rerank(self, query: str, documents: list[dict], top_k: int = RERANK_TOP_K) -> list[RerankResult]:
-        # TODO (optional): from flashrank import Ranker, RerankRequest
-        # model = Ranker(); passages = [{"text": d["text"]} for d in documents]
-        # results = model.rerank(RerankRequest(query=query, passages=passages))
-        return []
+        if not documents:
+            return []
+        from flashrank import RerankRequest
+        model = self._load_model()
+        passages = [{"id": i, "text": d.get("text", ""), "meta": d.get("metadata", {})} for i, d in enumerate(documents)]
+        request = RerankRequest(query=query, passages=passages)
+        results = model.rerank(request)
+        return [
+            RerankResult(
+                text=r.get("text", ""),
+                original_score=float(documents[r.get("id", 0)].get("score", 0.0)),
+                rerank_score=float(r.get("score", 0.0)),
+                metadata=r.get("meta", {}),
+                rank=i
+            )
+            for i, r in enumerate(results[:top_k])
+        ]
 
 
 def benchmark_reranker(reranker, query: str, documents: list[dict], n_runs: int = 5) -> dict:
